@@ -1,6 +1,8 @@
 #!/bin/sh
 
-echo "Loading, please wait..."
+# Default PATH differs between shells, and is not automatically exported
+# by klibc dash.  Make it consistent.
+export PATH=/sbin:/usr/sbin:/bin:/usr/bin
 
 [ -d /dev ] || mkdir -m 0755 /dev
 [ -d /root ] || mkdir -m 0700 /root
@@ -8,25 +10,39 @@ echo "Loading, please wait..."
 [ -d /proc ] || mkdir /proc
 [ -d /tmp ] || mkdir /tmp
 mkdir -p /var/lock
-mount -t sysfs -o nodev,noexec,nosuid none /sys
-mount -t proc -o nodev,noexec,nosuid none /proc
+mount -t sysfs -o nodev,noexec,nosuid sysfs /sys
+mount -t proc -o nodev,noexec,nosuid proc /proc
+
+# shellcheck disable=SC2013
+for x in $(cat /proc/cmdline); do
+	case $x in
+	initramfs.clear)
+		clear
+		;;
+	quiet)
+		quiet=y
+		;;
+	esac
+done
+
+if [ "$quiet" != "y" ]; then
+	quiet=n
+	echo "Loading, please wait..."
+fi
+export quiet
 
 # Note that this only becomes /dev on the real filesystem if udev's scripts
 # are used; which they will be, but it's worth pointing out
-tmpfs_size="10M"
-if [ -e /etc/udev/udev.conf ]; then
-	. /etc/udev/udev.conf
-fi
-if ! mount -t devtmpfs -o mode=0755 none /dev; then
-	echo "W: devtmpfs not available, falling back to tmpfs for /dev"
-	mount -t tmpfs -o size=$tmpfs_size,mode=0755 udev /dev
-	[ -e /dev/console ] || mknod -m 0600 /dev/console c 5 1
-	[ -e /dev/null ] || mknod /dev/null c 1 3
-fi
+mount -t devtmpfs -o nosuid,mode=0755 udev /dev
+
+# Prepare the /dev directory
+[ ! -h /dev/fd ] && ln -s /proc/self/fd /dev/fd
+[ ! -h /dev/stdin ] && ln -s /proc/self/fd/0 /dev/stdin
+[ ! -h /dev/stdout ] && ln -s /proc/self/fd/1 /dev/stdout
+[ ! -h /dev/stderr ] && ln -s /proc/self/fd/2 /dev/stderr
+
 mkdir /dev/pts
-mount -t devpts -o noexec,nosuid,gid=5,mode=0620 none /dev/pts || true
-> /dev/.initramfs-tools
-mkdir /dev/.initramfs
+mount -t devpts -o noexec,nosuid,gid=5,mode=0620 devpts /dev/pts || true
 
 # Export the dpkg architecture
 export DPKG_ARCH=
@@ -41,12 +57,12 @@ export ROOTDELAY=
 export ROOTFLAGS=
 export ROOTFSTYPE=
 export IP=
+export DEVICE=
 export BOOT=
 export BOOTIF=
 export UBIMTD=
 export break=
 export init=/sbin/init
-export quiet=n
 export readonly=y
 export rootmnt=/root
 export debug=
@@ -54,15 +70,22 @@ export panic=
 export blacklist=
 export resume=
 export resume_offset=
+export noresume=
+export drop_caps=
+export fastboot=n
+export forcefsck=n
+export fsckfix=
+
 
 # Bring in the main config
 . /conf/initramfs.conf
 for conf in conf/conf.d/*; do
-	[ -f ${conf} ] && . ${conf}
+	[ -f "${conf}" ] && . "${conf}"
 done
 . /scripts/functions
 
 # Parse command line options
+# shellcheck disable=SC2013
 for x in $(cat /proc/cmdline); do
 	case $x in
 	init=*)
@@ -70,40 +93,9 @@ for x in $(cat /proc/cmdline); do
 		;;
 	root=*)
 		ROOT=${x#root=}
-		case $ROOT in
-		LABEL=*)
-			ROOT="${ROOT#LABEL=}"
-
-			# support any / in LABEL= path (escape to \x2f)
-			case "${ROOT}" in
-			*/*)
-			if command -v sed >/dev/null 2>&1; then
-				ROOT="$(echo ${ROOT} | sed 's,/,\\x2f,g')"
-			else
-				if [ "${ROOT}" != "${ROOT#/}" ]; then
-					ROOT="\x2f${ROOT#/}"
-				fi
-				if [ "${ROOT}" != "${ROOT%/}" ]; then
-					ROOT="${ROOT%/}\x2f"
-				fi
-				IFS='/'
-				newroot=
-				for s in $ROOT; do
-					newroot="${newroot:+${newroot}\\x2f}${s}"
-				done
-				unset IFS
-				ROOT="${newroot}"
-			fi
-			esac
-			ROOT="/dev/disk/by-label/${ROOT}"
-			;;
-		UUID=*)
-			ROOT="/dev/disk/by-uuid/${ROOT#UUID=}"
-			;;
-		/dev/nfs)
-			[ -z "${BOOT}" ] && BOOT=nfs
-			;;
-		esac
+		if [ -z "${BOOT}" ] && [ "$ROOT" = "/dev/nfs" ]; then
+			BOOT=nfs
+		fi
 		;;
 	rootflags=*)
 		ROOTFLAGS="-o ${x#rootflags=}"
@@ -120,7 +112,11 @@ for x in $(cat /proc/cmdline); do
 		esac
 		;;
 	nfsroot=*)
+		# shellcheck disable=SC2034
 		NFSROOT="${x#nfsroot=}"
+		;;
+	initramfs.runsize=*)
+		RUNSIZE="${x#initramfs.runsize=}"
 		;;
 	ip=*)
 		IP="${x#ip=}"
@@ -140,16 +136,11 @@ for x in $(cat /proc/cmdline); do
 	noresume)
 		noresume=y
 		;;
+	drop_capabilities=*)
+		drop_caps="-d ${x#drop_capabilities=}"
+		;;
 	panic=*)
 		panic="${x#panic=}"
-		case ${panic} in
-		*[![:digit:].]*)
-			panic=
-			;;
-		esac
-		;;
-	quiet)
-		quiet=y
 		;;
 	ro)
 		readonly=y
@@ -160,7 +151,11 @@ for x in $(cat /proc/cmdline); do
 	debug)
 		debug=y
 		quiet=n
-		exec >/dev/.initramfs/initramfs.debug 2>&1
+		if [ -n "${netconsole}" ]; then
+			log_output=/dev/kmsg
+		else
+			log_output=/run/initramfs/initramfs.debug
+		fi
 		set -x
 		;;
 	debug=*)
@@ -179,31 +174,63 @@ for x in $(cat /proc/cmdline); do
 		;;
 	netconsole=*)
 		netconsole=${x#netconsole=}
+		[ "$debug" = "y" ] && log_output=/dev/kmsg
 		;;
 	BOOTIF=*)
 		BOOTIF=${x#BOOTIF=}
 		;;
+	fastboot|fsck.mode=skip)
+		fastboot=y
+		;;
+	forcefsck|fsck.mode=force)
+		forcefsck=y
+		;;
+	fsckfix|fsck.repair=yes)
+		fsckfix=y
+		;;
+	fsck.repair=no)
+		fsckfix=n
+		;;
 	esac
 done
 
-if [ -n "${noresume}" ]; then
-	export noresume
-	unset resume
+# Default to BOOT=local if no boot script defined.
+if [ -z "${BOOT}" ]; then
+	BOOT=local
+fi
+
+if [ -n "${noresume}" ] || [ "$RESUME" = none ]; then
+	noresume=y
 else
 	resume=${RESUME:-}
 fi
 
-[ -n "${netconsole}" ] && modprobe netconsole netconsole="${netconsole}"
+mount -t tmpfs -o "nodev,noexec,nosuid,size=${RUNSIZE:-10%},mode=0755" tmpfs /run
+mkdir -m 0700 /run/initramfs
+
+if [ -n "$log_output" ]; then
+	exec >"$log_output" 2>&1
+	unset log_output
+fi
 
 maybe_break top
 
-# Don't do log messages here to avoid confusing usplash
+# Don't do log messages here to avoid confusing graphical boots
 run_scripts /scripts/init-top
 
 maybe_break modules
 [ "$quiet" != "y" ] && log_begin_msg "Loading essential drivers"
+[ -n "${netconsole}" ] && /sbin/modprobe netconsole netconsole="${netconsole}"
 load_modules
 [ "$quiet" != "y" ] && log_end_msg
+
+starttime="$(_uptime)"
+starttime=$((starttime + 1)) # round up
+export starttime
+
+if [ "$ROOTDELAY" ]; then
+	sleep "$ROOTDELAY"
+fi
 
 maybe_break premount
 [ "$quiet" != "y" ] && log_begin_msg "Running /scripts/init-premount"
@@ -212,73 +239,63 @@ run_scripts /scripts/init-premount
 
 maybe_break mount
 log_begin_msg "Mounting root file system"
-. /scripts/${BOOT}
-parse_numeric ${ROOT}
+# Always load local and nfs (since these might be needed for /etc or
+# /usr, irrespective of the boot script used to mount the rootfs).
+. /scripts/local
+. /scripts/nfs
+. "/scripts/${BOOT}"
+parse_numeric "${ROOT}"
 maybe_break mountroot
+mount_top
+mount_premount
 mountroot
 log_end_msg
 
+if read_fstab_entry /usr; then
+	log_begin_msg "Mounting /usr file system"
+	mountfs /usr
+	log_end_msg
+fi
+
+# Mount cleanup
+mount_bottom
+nfs_bottom
+local_bottom
+
 maybe_break bottom
 [ "$quiet" != "y" ] && log_begin_msg "Running /scripts/init-bottom"
+# We expect udev's init-bottom script to move /dev to ${rootmnt}/dev
 run_scripts /scripts/init-bottom
 [ "$quiet" != "y" ] && log_end_msg
 
-# Move virtual filesystems over to the real filesystem
-mount -n -o move -t sysfs /sys ${rootmnt}/sys
-mount -n -o move -t proc /proc ${rootmnt}/proc
+# Move /run to the root
+mount -n -o move /run ${rootmnt}/run
 
 validate_init() {
-	checktarget="${1}"
-
-	# Work around absolute symlinks
-	if [ -d "${rootmnt}" ] && [ -h "${rootmnt}${checktarget}" ]; then
-		case $(readlink "${rootmnt}${checktarget}") in /*)
-			checktarget="$(chroot ${rootmnt} readlink ${checktarget})"
-			;;
-		esac
-	fi
-
-	# Make sure the specified init can be executed
-	if [ ! -x "${rootmnt}${checktarget}" ]; then
-		return 1
-	fi
-
-	# Upstart uses /etc/init as configuration directory :-/
-	if [ -d "${rootmnt}${checktarget}" ]; then
-		return 1
-	fi
+	run-init -n "${rootmnt}" "${1}"
 }
 
-# Check init bootarg
-if [ -n "${init}" ]; then
-	if ! validate_init "$init"; then
-		echo "Target filesystem doesn't have requested ${init}."
-		init=
-	fi
+# Check init is really there
+if ! validate_init "$init"; then
+	echo "Target filesystem doesn't have requested ${init}."
+	init=
+	for inittest in /sbin/init /etc/init /bin/init /bin/sh; do
+		if validate_init "${inittest}"; then
+			init="$inittest"
+			break
+		fi
+	done
 fi
 
-# Common case: /sbin/init is present
-if [ ! -x "${rootmnt}/sbin/init" ]; then
-	# ... if it's not available search for valid init
-	if [ -z "${init}" ] ; then
-		for inittest in /sbin/init /etc/init /bin/init /bin/sh; do
-			if validate_init "${inittest}"; then
-				init="$inittest"
-				break
-			fi
-		done
-	fi
-
-	# No init on rootmount
-	if ! validate_init "${init}" ; then
-		panic "No init found. Try passing init= bootarg."
-	fi
+# No init on rootmount
+if ! validate_init "${init}" ; then
+	panic "No init found. Try passing init= bootarg."
 fi
 
 maybe_break init
 
 # don't leak too much of env - some init(8) don't clear it
-# (keep init, rootmnt)
+# (keep init, rootmnt, drop_caps)
 unset debug
 unset MODPROBE_OPTIONS
 unset DPKG_ARCH
@@ -289,6 +306,7 @@ unset ROOT
 unset IP
 unset BOOT
 unset BOOTIF
+unset DEVICE
 unset UBIMTD
 unset blacklist
 unset break
@@ -298,7 +316,18 @@ unset quiet
 unset readonly
 unset resume
 unset resume_offset
+unset noresume
+unset fastboot
+unset forcefsck
+unset fsckfix
+unset starttime
+
+# Move virtual filesystems over to the real filesystem
+mount -n -o move /sys ${rootmnt}/sys
+mount -n -o move /proc ${rootmnt}/proc
 
 # Chain to real filesystem
-exec run-init ${rootmnt} ${init} "$@" <${rootmnt}/dev/console >${rootmnt}/dev/console
-panic "Could not execute run-init."
+# shellcheck disable=SC2086,SC2094
+exec run-init ${drop_caps} "${rootmnt}" "${init}" "$@" <"${rootmnt}/dev/console" >"${rootmnt}/dev/console" 2>&1
+echo "Something went badly wrong in the initramfs."
+panic "Please file a bug on initramfs-tools."

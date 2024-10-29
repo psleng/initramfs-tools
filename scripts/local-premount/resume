@@ -15,49 +15,32 @@ prereqs)
 	;;
 esac
 
-if [ -z "${resume}" ]; then
+if [ -z "${resume?}" ] || [ ! -e /sys/power/resume ]; then
 	exit 0
 fi
 
-case $resume in
-LABEL=*)
-	resume="${resume#LABEL=}"
+. /scripts/functions
+. /scripts/local
 
-	# support any / in LABEL= path (escape to \x2f)
-	case "${resume}" in
-	*/*)
-		if  command -v sed >/dev/null 2>&1; then
-			resume="$(echo ${resume} | sed 's,/,\\x2f,g')"
-		else
-			if [ "${resume}" != "${resume#/}" ]; then
-				resume="\x2f${resume#/}"
-			fi
-			if [ "${resume}" != "${resume%/}" ]; then
-				resume="${resume%/}\x2f"
-			fi
-			IFS='/'
-			newresume=
-			for s in $resume; do
-				newresume="${newresume:+${newresume}\\x2f}${s}"
-			done
-			unset IFS
-			resume="${newresume}"
-		fi
-	esac
-	resume="/dev/disk/by-label/${resume}"
-	;;
-UUID=*)
-	resume="/dev/disk/by-uuid/${resume#UUID=}"
-	;;
-esac
+if ! local_device_setup "${resume}" "suspend/resume device" false; then
+	exit 0
+fi
 
-[ ! -e "${resume}" ] && exit 0
+if [ "$(get_fstype "${DEV}")" = suspend ] &&
+   command -v plymouth >/dev/null &&
+   plymouth --ping; then
+	plymouth display-message --text="Resuming from hibernation"
 
-[ ! -e /sys/power/resume ] && exit 0
+	# The above command does not wait for a framebuffer update to
+	# complete, so the kernel can freeze the framebuffer before
+	# the message is even visible.  Wait just a moment to make
+	# that less likely.
+	sleep 0.1
+fi
 
 # hardcode path, uswsusp ships an resume binary too
-if [ -n "${resume_offset}" ]; then
-	/bin/resume ${resume} ${resume_offset}
+if [ -n "${resume_offset?}" ]; then
+	/bin/resume "${DEV}" "${resume_offset}"
 else
-	/bin/resume ${resume}
+	/bin/resume "${DEV}"
 fi

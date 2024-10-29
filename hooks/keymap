@@ -20,43 +20,21 @@ if [ "$KEYMAP" != "y" ] && [ "$KEYMAP" != "Y" ]; then
 	exit 0
 fi
 
-# Step 1 - Basic tools
-if [ ! -x /bin/loadkeys ] ||
-! ( [ -r /etc/console/boottime.kmap.gz ] \
-	|| [ -r /etc/console-setup/cached.kmap.gz ] ); then
+if [ ! -x /bin/setupcon ]; then
+	echo "setupcon is missing. Please install the 'console-setup' package."
 	exit 0
 fi
 
 . /usr/share/initramfs-tools/hook-functions
-copy_exec /bin/loadkeys /bin
 
-if [ -e /etc/console-setup/cached.kmap.gz ]; then
-	cp /etc/console-setup/cached.kmap.gz ${DESTDIR}/etc/boottime.kmap.gz
-else
-	cp /etc/console/boottime.kmap.gz ${DESTDIR}/etc/
-fi
+# Tell setupcon to copy/create the files it needs.
+setupcon --setup-dir "$DESTDIR"
 
-# Step 2 - Check for UTF8 console
-if [ ! -x /usr/bin/kbd_mode ]; then
-	exit 0
-fi
+# Copy additional files that setupcon needs.  We assume they are
+# executables.
+while read -r file; do
+	copy_exec "$file"
+done < "$DESTDIR/morefiles"
+rm -f "$DESTDIR/morefiles"
 
-if [ -r /etc/environment ]; then
-	env="/etc/environment"
-elif [ -r /etc/default/locale ]; then
-	env="/etc/default/locale"
-else
-	exit 0
-fi
-
-for var in LANG LC_ALL LC_CTYPE; do
-	value=$(egrep "^[^#]*${var}=" $env | tail -n1 | cut -d= -f2)
-	eval $var=$value
-done
-
-charmap=$(LANG=$LANG LC_ALL=$LC_ALL LC_CTYPE=$LC_CTYPE locale charmap)
-if [ "$charmap" = "UTF-8" ]; then
-	copy_exec /usr/bin/kbd_mode /bin
-fi
 exit 0
-

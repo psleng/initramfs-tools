@@ -1,23 +1,37 @@
 Source: initramfs-tools
 Section: utils
 Priority: optional
-Maintainer: VyOS maintainers <maintainers@vyos.net>
-Build-Depends: debhelper (>= 7.0)
-Standards-Version: 3.9.1
-Vcs-Browser: http://git.debian.org/?p=kernel/initramfs-tools.git
-Vcs-Git: git://git.debian.org/git/kernel/initramfs-tools.git
+Uploaders: Michael Prokop <mika@debian.org>, Ben Hutchings <benh@debian.org>
+Maintainer: Debian kernel team <debian-kernel@lists.debian.org>
+Build-Depends: debhelper-compat (= 12), bash-completion
+Rules-Requires-Root: no
+Standards-Version: 4.1.5
+Vcs-Browser: https://salsa.debian.org/kernel-team/initramfs-tools
+Vcs-Git: https://salsa.debian.org/kernel-team/initramfs-tools.git
 
 Package: initramfs-tools
 Architecture: all
-Recommends: busybox (>= 1:1.01-3) | busybox-initramfs
-Depends: klibc-utils (>= 1.5.9-1), cpio, module-init-tools, udev (>= 0.086-1), findutils (>= 4.2.24), ${misc:Depends}
+Multi-Arch: foreign
+Depends: initramfs-tools-core (= ${binary:Version}), linux-base, ${misc:Depends}
 Suggests: bash-completion
 Provides: linux-initramfs-tool
-Description: tools for generating an initramfs
- This package contains tools to create and boot an initramfs for packaged 2.6
- Linux kernel. The initramfs is a gzipped cpio archive. At boot time, the
- kernel unpacks that archive into RAM, mounts and uses it as initial root file
- system. The mounting of the real root file system occurs in early user space.
- klibc provides utilities to setup root. Having the root on MD, LVM2, LUKS or
- NFS is also supported.
- Any boot loader with initrd support is able to load an initramfs archive.
+Conflicts: linux-initramfs-tool, usplash (<< 0.5.50)
+Breaks: initscripts (<< 2.88dsf-59.3~), upstart, e2fsprogs (<< 1.42.13)
+Description: generic modular initramfs generator (automation)
+ This package builds a bootable initramfs for Linux kernel packages.  The
+ initramfs is loaded along with the kernel and is responsible for
+ mounting the root filesystem and starting the main init system.
+
+Package: initramfs-tools-core
+Architecture: all
+Multi-Arch: foreign
+Recommends: ${busybox:Recommends}, zstd
+Depends: klibc-utils (>= 2.0.4-8~), cpio (>= 2.12), kmod, udev, coreutils (>= 8.24), logsave | e2fsprogs (<< 1.45.3-1~), ${misc:Depends}
+Suggests: bash-completion
+Breaks: initramfs-tools (<< 0.121~), ${busybox:Breaks}
+Replaces: initramfs-tools (<< 0.121~)
+Description: generic modular initramfs generator (core tools)
+ This package contains the mkinitramfs program that can be used to
+ create a bootable initramfs for a Linux kernel.  The initramfs should
+ be loaded along with the kernel and is then responsible for mounting
+ the root filesystem and starting the main init system.
